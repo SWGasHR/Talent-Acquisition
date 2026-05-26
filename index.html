@@ -838,6 +838,75 @@
       font-weight: 700;
     }
 
+    /* --- SMARTSHEET AUTH REFRESH BANNER --- */
+    .auth-refresh-banner {
+      background: linear-gradient(135deg, #ffffff 0%, #eef4ff 100%);
+      color: #252763;
+      border-bottom: 1px solid #dedff1;
+      padding: 10px 18px;
+      font-size: 13px;
+      line-height: 1.4;
+      flex-shrink: 0;
+      z-index: 11;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+    }
+
+    .auth-refresh-banner.hidden {
+      display: none;
+    }
+
+    .auth-refresh-banner-inner {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      text-align: center;
+    }
+
+    .auth-refresh-banner strong {
+      font-weight: 800;
+    }
+
+    .auth-refresh-banner span {
+      color: #333;
+    }
+
+    .auth-refresh-banner button {
+      font-family: inherit;
+      border: none;
+      border-radius: 7px;
+      cursor: pointer;
+      font-weight: 700;
+    }
+
+    #authRefreshButton {
+      background: #252763;
+      color: white;
+      padding: 7px 12px;
+      box-shadow: 0 4px 10px rgba(37, 39, 99, 0.18);
+    }
+
+    #authRefreshButton:hover,
+    #authRefreshButton:focus {
+      background: #1d1f50;
+      outline: none;
+    }
+
+    #authRefreshDismiss {
+      background: transparent;
+      color: #252763;
+      font-size: 20px;
+      line-height: 1;
+      padding: 2px 8px;
+    }
+
+    #authRefreshDismiss:hover,
+    #authRefreshDismiss:focus {
+      background: rgba(37, 39, 99, 0.08);
+      outline: none;
+    }
+
     /* --- IFRAME AREA --- */
     .iframe-wrap {
       position: relative;
@@ -1304,6 +1373,15 @@
     To make updates, open the specific project sheet from the Projects menu.
   </div>
 
+  <div class="auth-refresh-banner hidden" id="authRefreshBanner" role="status" aria-live="polite">
+    <div class="auth-refresh-banner-inner">
+      <strong>Welcome back.</strong>
+      <span>If you just signed in to Smartsheet, click Refresh Smartsheet Views to reload your access. If Smartsheet still asks you to log in, complete the login first and return here.</span>
+      <button type="button" id="authRefreshButton">Refresh Smartsheet Views</button>
+      <button type="button" id="authRefreshDismiss" aria-label="Dismiss sign-in refresh message">×</button>
+    </div>
+  </div>
+
   <div class="iframe-wrap">
     <div class="iframe-pool" id="iframePool"></div>
 
@@ -1564,6 +1642,9 @@
     const requestAccessLink = document.getElementById("requestAccessLink");
     const placeholderEmailLink = document.getElementById("placeholderEmailLink");
     const placeholderProjectCreationLink = document.getElementById("placeholderProjectCreationLink");
+    const authRefreshBanner = document.getElementById("authRefreshBanner");
+    const authRefreshButton = document.getElementById("authRefreshButton");
+    const authRefreshDismiss = document.getElementById("authRefreshDismiss");
 
     let projectModeActive = false;
     let pendingNavigationAction = null;
@@ -1596,20 +1677,22 @@
     const PRELOAD_STAGGER_MS = 250;
 
     /*
-      If a user is signed out of Smartsheet, the embedded view may send them
-      to a separate sign-in tab. When they return, the already-preloaded
-      iframes can still show the old sign-in screen. This refreshes the portal
-      one time after a likely Smartsheet sign-in return so every iframe reloads
-      with the new signed-in session.
+      Smartsheet sign-in recovery.
+      Because the Smartsheet sign-in button lives inside a cross-domain iframe,
+      this portal cannot reliably detect the exact sign-in click. To avoid random
+      full-page refreshes, the portal now shows a safe refresh banner after a
+      likely sign-in return. The user can refresh only the embedded Smartsheet
+      views without reloading the entire portal.
     */
     const AUTH_STORAGE_PREFIX = String(PORTAL_CONFIG.departmentName || "department")
       .replace(/[^a-z0-9]/gi, "")
       .toLowerCase() || "department";
-    const AUTH_RETURN_REFRESH_DONE_KEY = AUTH_STORAGE_PREFIX + "PortalSmartsheetAuthRefreshDone";
     const AUTH_RETURN_PENDING_KEY = AUTH_STORAGE_PREFIX + "PortalPossibleSmartsheetAuthReturn";
-    const AUTH_RETURN_MIN_AWAY_MS = 5000;
+    const AUTH_RETURN_BANNER_DISMISSED_KEY = AUTH_STORAGE_PREFIX + "PortalAuthRefreshBannerDismissedAt";
+    const AUTH_IFRAME_TO_HIDE_WINDOW_MS = 3000;
+    const AUTH_RETURN_MIN_AWAY_MS = 6000;
     const AUTH_RETURN_MAX_AWAY_MS = 20 * 60 * 1000;
-    const IFRAME_INTERACTION_WINDOW_MS = 45000;
+    const AUTH_BANNER_DISMISS_COOLDOWN_MS = 5 * 60 * 1000;
 
     let lastIframeInteractionAt = 0;
     let authReturnRefreshTimer = null;
@@ -1820,22 +1903,23 @@
       lastIframeInteractionAt = Date.now();
     }
 
-    function markPossibleSmartsheetAuthReturn() {
-      if (sessionStorage.getItem(AUTH_RETURN_REFRESH_DONE_KEY) === "true") {
-        return;
-      }
-
-      const clickedIframeRecently = Date.now() - lastIframeInteractionAt <= IFRAME_INTERACTION_WINDOW_MS;
-
-      if (!clickedIframeRecently) {
-        return;
-      }
-
-      sessionStorage.setItem(AUTH_RETURN_PENDING_KEY, String(Date.now()));
+    function clearPossibleSmartsheetAuthReturn() {
+      sessionStorage.removeItem(AUTH_RETURN_PENDING_KEY);
     }
 
-    function refreshOnceAfterSmartsheetAuthReturn() {
-      if (sessionStorage.getItem(AUTH_RETURN_REFRESH_DONE_KEY) === "true") {
+    function markPossibleSmartsheetAuthReturn() {
+      const now = Date.now();
+      const iframeWasJustUsed = now - lastIframeInteractionAt <= AUTH_IFRAME_TO_HIDE_WINDOW_MS;
+
+      if (!iframeWasJustUsed) {
+        return;
+      }
+
+      sessionStorage.setItem(AUTH_RETURN_PENDING_KEY, String(now));
+    }
+
+    function showAuthRefreshBannerIfNeeded() {
+      if (!authRefreshBanner) {
         return;
       }
 
@@ -1845,10 +1929,11 @@
         return;
       }
 
-      const timeAway = Date.now() - pendingAt;
+      const now = Date.now();
+      const timeAway = now - pendingAt;
 
       if (timeAway > AUTH_RETURN_MAX_AWAY_MS) {
-        sessionStorage.removeItem(AUTH_RETURN_PENDING_KEY);
+        clearPossibleSmartsheetAuthReturn();
         return;
       }
 
@@ -1856,19 +1941,74 @@
         return;
       }
 
-      sessionStorage.setItem(AUTH_RETURN_REFRESH_DONE_KEY, "true");
-      sessionStorage.removeItem(AUTH_RETURN_PENDING_KEY);
+      const dismissedAt = Number(sessionStorage.getItem(AUTH_RETURN_BANNER_DISMISSED_KEY) || 0);
 
-      suppressUnsavedBeforeUnload = true;
-      window.location.reload();
+      if (dismissedAt && now - dismissedAt < AUTH_BANNER_DISMISS_COOLDOWN_MS) {
+        clearPossibleSmartsheetAuthReturn();
+        return;
+      }
+
+      authRefreshBanner.classList.remove("hidden");
     }
 
     function scheduleAuthReturnRefreshCheck() {
+      if (!sessionStorage.getItem(AUTH_RETURN_PENDING_KEY)) {
+        return;
+      }
+
       clearTimeout(authReturnRefreshTimer);
 
       authReturnRefreshTimer = setTimeout(function() {
-        refreshOnceAfterSmartsheetAuthReturn();
+        showAuthRefreshBannerIfNeeded();
       }, 500);
+    }
+
+    function hideAuthRefreshBanner() {
+      if (authRefreshBanner) {
+        authRefreshBanner.classList.add("hidden");
+      }
+    }
+
+    function refreshSmartsheetIframes() {
+      clearPossibleSmartsheetAuthReturn();
+      hideAuthRefreshBanner();
+
+      Object.keys(iframeRegistry).forEach(function(registryKey) {
+        const record = iframeRegistry[registryKey];
+
+        if (!record || !record.frame) {
+          return;
+        }
+
+        const separatorIndex = registryKey.indexOf(":");
+
+        if (separatorIndex === -1) {
+          return;
+        }
+
+        const route = {
+          type: registryKey.slice(0, separatorIndex),
+          id: registryKey.slice(separatorIndex + 1)
+        };
+
+        const embedData = getEmbedDataForRoute(route);
+
+        if (!embedData || isPlaceholderLink(embedData.embedSrc)) {
+          return;
+        }
+
+        record.isLoaded = false;
+
+        if (registryKey === currentViewKey) {
+          showLoadingMessage();
+        }
+
+        record.frame.src = "about:blank";
+
+        setTimeout(function() {
+          record.frame.src = embedData.embedSrc;
+        }, 75);
+      });
     }
 
     function parseHashRoute() {
@@ -2746,6 +2886,20 @@
     projectSearch.addEventListener("input", filterProjectLinks);
     window.addEventListener("hashchange", handleHashChange);
 
+    if (authRefreshButton) {
+      authRefreshButton.addEventListener("click", function() {
+        refreshSmartsheetIframes();
+      });
+    }
+
+    if (authRefreshDismiss) {
+      authRefreshDismiss.addEventListener("click", function() {
+        sessionStorage.setItem(AUTH_RETURN_BANNER_DISMISSED_KEY, String(Date.now()));
+        clearPossibleSmartsheetAuthReturn();
+        hideAuthRefreshBanner();
+      });
+    }
+
     window.addEventListener("blur", function() {
       const activeElement = document.activeElement;
 
@@ -2757,7 +2911,10 @@
     document.addEventListener("visibilitychange", function() {
       if (document.visibilityState === "hidden") {
         markPossibleSmartsheetAuthReturn();
-      } else {
+        return;
+      }
+
+      if (document.visibilityState === "visible") {
         scheduleAuthReturnRefreshCheck();
       }
     });
